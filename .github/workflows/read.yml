@@ -1,0 +1,68 @@
+# Reads narration lines aloud when a script is added or changed. Ten machines read at the same time.
+name: Read a script aloud
+
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "Script file name in scripts, without .json"
+        required: true
+  push:
+    branches: [main]
+    paths: ["scripts/*.json"]
+
+permissions:
+  contents: write
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Pick the scripts to read
+        env:
+          INPUT_SCRIPT: ${{ github.event.inputs.script }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -n "$INPUT_SCRIPT" ]; then
+            echo "scripts/$INPUT_SCRIPT.json" > todo.txt
+          elif git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            git diff --name-only --diff-filter=AM "$BEFORE" "$GITHUB_SHA" -- 'scripts/*.json' > todo.txt
+          else
+            ls scripts/*.json > todo.txt
+          fi
+          cat todo.txt
+          test -s todo.txt
+      - name: Install the voice
+        run: python3 -m pip install --quiet chatterbox-tts
+      - name: Read the lines aloud
+        run: |
+          for f in $(cat todo.txt); do node read.js "$f" --shard=${{ matrix.shard }}/10; done
+      - name: Save the clips
+        if: always()
+        run: |
+          git config user.name "Bluewater voice reader"
+          git config user.email "voice@users.noreply.github.com"
+          git add clips
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(clips): save narration clips"
+            pushed=no
+            for n in 1 2 3 4 5 6 7 8; do
+              if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"; then pushed=yes; break; fi
+              sleep $((n * 6))
+            done
+            test "$pushed" = yes
+          fi
